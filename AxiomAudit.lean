@@ -54,7 +54,7 @@ partial def axiomsOf (c : Name) : AxiomM (Array Name) := do
   let fromExprs (es : Array Expr) : AxiomM NameSet :=
     es.foldlM (init := {}) fun acc e => fromConsts e.getUsedConstants acc
   let used : NameSet ← do
-    match env.checked.get.find? c with
+    match env.find? c with
     | some (.axiomInfo v) =>
         let t ← fromExprs #[v.type]
         pure (t.insert c)
