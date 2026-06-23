@@ -1,0 +1,15 @@
+name = "axiomAudit"
+defaultTargets = ["axiom-audit"]
+
+# Deliberately dependency-free: the tool imports only `Lean` (core) and loads the audited
+# project's modules at runtime via `withImportModules`. Keeping it dep-free means it builds under
+# any project's toolchain with nothing else to resolve — important for the lean-action clone+build
+# integration.
+
+[[lean_lib]]
+name = "AxiomAudit"
+
+[[lean_exe]]
+name = "axiom-audit"
+root = "Main"
+supportInterpreter = true
