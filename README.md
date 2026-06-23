@@ -11,29 +11,33 @@ text, it catches what a `grep` cannot:
 
 ## Usage
 
-Build your project first, then run the tool **from the project root** so it can find your oleans:
+Build your project first, then run the tool **from the project root** so it can find your oleans.
+In a standard single-library workspace, no arguments are needed — it audits the lakefile's library:
 
 ```bash
 lake build
-lake exe axiom-audit --root MyLib
+lake exe axiom-audit          # audits the lakefile's lean_lib; or `lake env axiom-audit`
 ```
 
-or, if you depend on it as a Lake package, `lake exe axiom-audit …`. It exits `0` when clean, `1`
-on a violation (or if nothing was audited), and `2` on a usage error.
+It exits `0` when clean, `1` on a violation (or if nothing was audited), and `2` on a usage/IO error.
+
+It works on both **classic** and **module-system** (`module`/`public`/`private`) projects, and
+catches axioms reached through `private` declarations (their bodies are present in the imported
+environment).
 
 ### Options
 
 | flag | meaning |
 | --- | --- |
-| `--root <Namespace>` | **(required)** audit declarations defined under this namespace |
-| `--allow a,b,c` | comma-separated allowlist of axioms (no spaces). Default: `propext,Classical.choice,Quot.sound` |
-| `--modules a,b,c` | import exactly these modules to build the environment |
+| `--root <Namespace>` | audit declarations defined in modules under this root. Defaults to the first `lean_lib` in the lakefile |
+| `--allow a,b,c` | comma-separated allowlist of axioms (surrounding spaces are trimmed). Default: `propext,Classical.choice,Quot.sound` |
+| `--modules a,b,c` | import exactly these modules to build the environment (instead of the root module) |
 | `--modules-from <dir>` | import every `.lean` module found under `<dir>` — for a root that does not transitively import the whole library (e.g. an intentionally empty root) |
 | `--json` | print a machine-readable JSON report instead of human-readable text |
 | `-h`, `--help` | show help |
 
 With neither `--modules` nor `--modules-from`, the root module itself is imported (assuming it
-imports the library).
+imports the library); for an intentionally-empty root, use `--modules-from <libdir>`.
 
 ### JSON output (`--json`)
 

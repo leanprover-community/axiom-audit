@@ -101,6 +101,32 @@ partial def collectLeanModules (dir : System.FilePath) : IO (Array Name) := do
       acc := acc.push (pathToModule entry.path)
   return acc
 
+/-- Best-effort auto-detection of the library root: the first `lean_lib` name in the lakefile
+(`lakefile.toml`'s `[[lean_lib]]` or `lakefile.lean`'s `lean_lib`). Used when `--root` is not given,
+so `axiom-audit` "just works" in a standard single-library workspace. Returns `none` if no lakefile
+or no library is found (then the caller asks for an explicit `--root`). -/
+def detectRoot : IO (Option Name) := do
+  let firstQuoted (s : String) : Option Name :=
+    match s.splitOn "\"" with
+    | _ :: v :: _ => some v.toName
+    | _ => none
+  if (← System.FilePath.pathExists "lakefile.toml") then
+    let mut inLib := false
+    for line in (← IO.FS.readFile "lakefile.toml").splitOn "\n" do
+      if line.startsWith "[[lean_lib]]" then inLib := true
+      else if line.startsWith "[" then inLib := false
+      else if inLib && line.startsWith "name" then
+        if let some n := firstQuoted line then return some n
+    return none
+  else if (← System.FilePath.pathExists "lakefile.lean") then
+    for line in (← IO.FS.readFile "lakefile.lean").splitOn "\n" do
+      if let some after := (line.splitOn "lean_lib ")[1]? then
+        let tok := (((after.splitOn " ")[0]?.getD "").replace "«" "").replace "»" ""
+        if tok ≠ "" then return some tok.toName
+    return none
+  else
+    return none
+
 /-- The result of an audit, rendered to `String`s inside the environment callback (declaration and
 axiom `Name`s live in a memory-mapped region unmapped once `withImportModules` returns). -/
 structure Report where
@@ -112,13 +138,15 @@ structure Report where
   /-- `(declaration, the disallowed axioms it uses)` for each offending declaration. -/
   violations : Array (String × Array String)
 
-def Report.ok (r : Report) : Bool := r.violations.isEmpty
+/-- The audit succeeded only if there were no violations AND something was actually audited (an
+empty audit usually means a miswired root/module selection, not a clean library). -/
+def Report.ok (r : Report) : Bool := r.violations.isEmpty && r.audited > 0
 
 /-- A heap-owned copy of a name's string. Names loaded from `.olean`s carry string data in a
 memory-mapped region that is unmapped once `withImportModules` returns; `toString` can hand back a
-string still backed by that region, so we rebuild it from its characters to make it self-owned and
-safe to keep in the returned `Report`. -/
-def freshStr (n : Name) : String := String.mk (toString n).data
+string still backed by that region, so we rebuild it character by character to make it self-owned
+and safe to keep in the returned `Report`. -/
+def freshStr (n : Name) : String := (toString n).foldl (fun acc c => acc.push c) ""
 
 /-- Audit every declaration defined under `root`, against `allowed`. -/
 def audit (root : Name) (allowed : List Name) : CoreM Report := do
