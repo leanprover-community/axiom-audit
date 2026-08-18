@@ -112,7 +112,9 @@ def main (args : List String) : IO UInt32 := do
       return 0
     else
       IO.eprintln s!"axiom-audit: {r.violations.size} declaration(s) under '{r.root}' use disallowed axioms:"
-      for (d, axs) in r.violations do
-        IO.eprintln s!"  {d} → {axs.toList}"
+      for v in r.violations do
+        match v.loc? with
+        | some loc => IO.eprintln s!"  {loc}: {v.decl} → {v.axioms.toList}"
+        | none => IO.eprintln s!"  {v.decl} → {v.axioms.toList}"
       IO.eprintln s!"allowed: {r.allowed.toList}"
       return 1

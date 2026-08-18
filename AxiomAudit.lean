@@ -76,12 +76,21 @@ partial def axiomsOf (c : Name) : AxiomM (Array Name) := do
 `trustLevel := 1024` means imported constants are taken as type-correct rather than re-checked: this
 audit checks *which axioms* a declaration depends on, not whether the proofs are valid, so it relies
 on a prior `lake build` having kernel-checked the library. It is not a defense against stale or
-hand-forged `.olean`s. -/
+hand-forged `.olean`s.
+
+`loadExts := true` materializes the persistent environment extensions, needed to find
+source locations of declarations.
+ -/
 def withImportedEnv {α} (modules : Array Name) (act : CoreM α) : IO α := do
   initSearchPath (← findSysroot)
-  unsafe Lean.withImportModules (modules.map (fun m => { module := m })) {} (trustLevel := 1024)
-    fun env => Prod.fst <$> Core.CoreM.toIO act
+  unsafe enableInitializersExecution -- required by `loadExts := true`; the exe supports the interpreter
+  let env ← importModules (modules.map (fun m => { module := m })) {} (trustLevel := 1024)
+    (loadExts := true)
+  try
+    Prod.fst <$> Core.CoreM.toIO act
       (ctx := { fileName := "<axiom-audit>", fileMap := default }) (s := { env := env })
+  finally
+    unsafe env.freeRegions
 
 /-- Is `mod` the audited root or one of its submodules? -/
 def inAuditedLib (root : Name) (mod : Name) : Bool := mod == root || root.isPrefixOf mod
@@ -127,26 +136,72 @@ def detectRoot : IO (Option Name) := do
   else
     return none
 
+/-- A source location, `1`-based line and `0`-based column. -/
+structure Loc where
+  path : String
+  line : Nat
+  col : Nat
+
+instance : ToString Loc := ⟨fun l => s!"{l.path}:{l.line}:{l.col}"⟩
+
+/-- An offending declaration. -/
+structure Violation where
+  decl : String
+  axioms : Array String
+  loc? : Option Loc
+
 /-- The result of an audit, rendered to `String`s inside the environment callback (declaration and
-axiom `Name`s live in a memory-mapped region unmapped once `withImportModules` returns). -/
+axiom `Name`s live in a memory-mapped region unmapped once `withImportedEnv` returns). -/
 structure Report where
   root : String
   allowed : Array String
   audited : Nat
   /-- Distinct axioms used anywhere under `root`, sorted. -/
   axiomsUsed : Array String
-  /-- `(declaration, the disallowed axioms it uses)` for each offending declaration. -/
-  violations : Array (String × Array String)
+  violations : Array Violation
 
 /-- The audit succeeded only if there were no violations AND something was actually audited (an
 empty audit usually means a miswired root/module selection, not a clean library). -/
 def Report.ok (r : Report) : Bool := r.violations.isEmpty && r.audited > 0
 
-/-- A heap-owned copy of a name's string. Names loaded from `.olean`s carry string data in a
-memory-mapped region that is unmapped once `withImportModules` returns; `toString` can hand back a
-string still backed by that region, so we rebuild it character by character to make it self-owned
-and safe to keep in the returned `Report`. -/
-def freshStr (n : Name) : String := (toString n).foldl (fun acc c => acc.push c) ""
+/-- A heap-owned copy of a string. Data loaded from `.olean`s lives in a memory-mapped region that
+is unmapped once `withImportedEnv` returns; strings derived from it can still be backed by that
+region, so we rebuild them character by character to make them self-owned and safe to keep in the
+returned `Report`. -/
+def freshStr' (s : String) : String := s.foldl (fun acc c => acc.push c) ""
+
+/-- A heap-owned copy of a name's string; see `freshStr'`. -/
+def freshStr (n : Name) : String := freshStr' (toString n)
+
+/-- `p` relative to the current directory when it lies under it,
+otherwise unchanged (absolute). -/
+def relativeToCwd (p : System.FilePath) : IO System.FilePath := do
+  let cwd := (← IO.currentDir).toString
+  let p := (← IO.FS.realPath p).toString
+  let pre := cwd ++ System.FilePath.pathSeparator.toString
+  return ⟨if p.startsWith pre then (p.toSubstring.drop pre.length).toString else p⟩
+
+/-- The source file of module `mod`. Searches `LEAN_SRC_PATH`, falls back to guessing
+the path from the module name. -/
+def moduleSource (mod : Name) : IO System.FilePath := do
+  match ← (← getSrcSearchPath).findModuleWithExt "lean" mod with
+  | some p => relativeToCwd p
+  | none => return System.mkFilePath (mod.components.map toString) |>.addExtension "lean"
+
+/-- The source location of `decl`'s name: the file of its module plus the declaration's selection
+range (where Lean's own diagnostics for the declaration point). `none` when the module is unknown
+or the library was compiled without declaration ranges. Strings are rebuilt via `freshStr'` for the
+same reason as everywhere else: the backing data can be memory-mapped. -/
+def declLoc? (decl : Name) : CoreM (Option Loc) := do
+  let env ← getEnv
+  let some idx := env.getModuleIdxFor? decl | return none
+  let some mod := env.allImportedModuleNames[idx.toNat]? | return none
+  let some ranges ← findDeclarationRanges? decl | return none
+  return some {
+    path := freshStr' (← moduleSource mod).toString
+    line := ranges.selectionRange.pos.line
+    col := ranges.selectionRange.pos.column
+  }
 
 /-- Audit every declaration defined under `root`, against `allowed`. -/
 def audit (root : Name) (allowed : List Name) : CoreM Report := do
@@ -164,14 +219,18 @@ def audit (root : Name) (allowed : List Name) : CoreM Report := do
   -- One shared-cache pass: the full axiom set of every candidate.
   let perDecl : Array (Array Name) := (candidates.mapM axiomsOf |>.run env).run' {}
   let mut usedAll : NameSet := {}
-  let mut violations : Array (String × Array String) := #[]
+  let mut violations : Array Violation := #[]
   for i in [0:candidates.size] do
     let decl := candidates[i]!
     let axs := perDecl[i]!
     for ax in axs do usedAll := usedAll.insert ax
     let bad := axs.filter (!allowedSet.contains ·)
     if !bad.isEmpty then
-      violations := violations.push (freshStr decl, bad.map freshStr)
+      violations := violations.push {
+        decl := freshStr decl
+        axioms := bad.map freshStr
+        loc? := ← declLoc? decl
+      }
   return {
     root := freshStr root
     allowed := (allowed.map freshStr).toArray
@@ -188,8 +247,12 @@ def Report.toJson (r : Report) : Lean.Json :=
     ("audited", Lean.toJson r.audited),
     ("ok", Json.bool r.ok),
     ("axiomsUsed", Lean.toJson r.axiomsUsed),
-    ("violations", Lean.toJson (r.violations.map fun (d, axs) =>
-      Json.mkObj [("decl", Json.str d), ("axioms", Lean.toJson axs)]))
+    ("violations", Lean.toJson (r.violations.map fun v =>
+      Json.mkObj <| [("decl", Json.str v.decl), ("axioms", Lean.toJson v.axioms)] ++
+        match v.loc? with
+        | some l => [("file", Json.str l.path), ("line", Lean.toJson l.line),
+                     ("col", Lean.toJson l.col)]
+        | none => []))
   ]
 
 end AxiomAudit

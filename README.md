@@ -50,9 +50,14 @@ For tool interaction, `--json` reports **all axioms used** project-wide plus any
   "audited": 4426,
   "ok": true,
   "axiomsUsed": ["propext", "Classical.choice", "Quot.sound"],
-  "violations": [ { "decl": "MyLib.bad", "axioms": ["MyLib.myAxiom"] } ]
+  "violations": [
+    { "decl": "MyLib.bad", "axioms": ["MyLib.myAxiom"],
+      "file": "MyLib/Foo.lean", "line": 4, "col": 8 }
+  ]
 }
 ```
+
+The `file`/`line`/`col` fields are omitted from a violation when no source location is available.
 
 ## How it works
 
